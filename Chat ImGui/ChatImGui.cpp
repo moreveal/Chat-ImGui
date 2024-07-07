@@ -1,20 +1,26 @@
 #include "pch.h"
 #include "ChatImGui.h"
+
 #include "snippets.hpp"
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 void ChatImGui::initialize()
 {
 	mChatLines.reserve(152);
-
+	
 	mChatConstrHook = new rtdhook(sampGetChatConstr(), &CChat__CChat);
 	mChatOnLostDeviceHook = new rtdhook(sampGetChatOnLostDevice(), &CChat__OnLostDevice, 9);
 	mChatAddEntryHook = new rtdhook(sampGetAddEntryFuncPtr(), &CChat__AddEntry);
+	mRecalcFontSizeHook = new rtdhook(sampGetRecalcFontSize(), &CChat__RecalcFontSize, 33);
 	mChatRenderHook = new rtdhook_call(sampGetChatRender(), &CChat__Render);
 
 	mChatDXUTScrollHook = new rtdhook_call(sampGetChatScrollDXUTScrollCallPtr(), &CDXUTScrollBar__Scroll);
 	mChatScrollToBottomHook = new rtdhook(sampGetChatScrollToBottomFuncPtr(), &CChat__ScrollToBottom, 7);
 	mChatPageUpHook = new rtdhook(sampGetChatPageUpFuncPtr(), &CChat__PageUp, 6);
 	mChatPageDownHook = new rtdhook(sampGetChatPageDownFuncPtr(), &CChat__PageDown, 6);
+	
+	mObjectEditRenderHook = new rtdhook(sampGetObjectEditRender(), &CObjectEdit__Render, 9);
 
 	{ // Nops
 		DWORD old_protection;
@@ -32,10 +38,16 @@ void ChatImGui::initialize()
 	mChatRenderHook->install();
 	mChatAddEntryHook->install();
 
+	mRecalcFontSizeHook->install();
+
 	mChatDXUTScrollHook->install();
 	mChatScrollToBottomHook->install();
 	mChatPageUpHook->install();
 	mChatPageDownHook->install();
+	
+	mObjectEditRenderHook->install();
+
+	//AllocConsole(); freopen("CONOUT$", "w", stdout); // Log
 
 	std::thread([&]
 		{
@@ -47,8 +59,45 @@ void ChatImGui::initialize()
 			mChatAlphaEnabled = sampReadVariableFromConfig("alphachat");
 
 			mLinesCount = sampGetPagesize();
+
+			// WndProcHook
+			while (!(*reinterpret_cast<uintptr_t*>(0x00C8D4C0) == 9 && sampGetBase() != 0)) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			const HWND GameHWND = *(*reinterpret_cast<HWND**>(0xC17054));
+			mWndProcHook = new rtdhook_call(GetWindowLongPtrW(GameHWND, GWLP_WNDPROC), &WndProcHandle);
+			mWndProcHook->install();
 		}
 	).detach();
+}
+
+LRESULT CALLBACK WndProcHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	wchar_t wch;
+	MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, reinterpret_cast<char*>(&wParam), 1, &wch, 1);
+	ImGui_ImplWin32_WndProcHandler(hWnd, msg, wch, lParam);
+	
+	if (msg == WM_KEYDOWN && wParam == VK_F2 && (GetKeyState(VK_SHIFT) & 0x8000) && (HIWORD(lParam) & KF_REPEAT) != KF_REPEAT) // Shift + F2 (1 press)
+	{
+		// TODO: ScreenChat (rendering chat to the DirectX texture and save it to file)
+		//sampAddChatMessage("Save chat screen to: test\\xx-xx-xx.png", 0x88AA62);
+	}
+
+	// Close editline window by esc/enter + block this keys for game
+	static bool editLineClosed = false;
+	if (editLineClosed && msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE)) return true;
+	if (msg != WM_QUIT && msg != WM_DESTROY && msg != WM_CLOSE && msg != WM_SYSCOMMAND) {
+		if (editLineWindow || (editLineClosed && msg == WM_KEYUP))
+		{
+			editLineClosed = false;
+			if (msg == WM_KEYDOWN && (wParam == VK_ESCAPE || wParam == VK_RETURN)) {
+				editLineWindow = false;
+				editLineClosed = true;
+				pSelectedChatLine = nullptr;
+			}
+			return true;
+		}
+	}
+
+	return CallWindowProc(reinterpret_cast<WNDPROC>(gChat.getWndProcHook()->getHookedFunctionAddress()), hWnd, msg, wParam, lParam);
 }
 
 void ChatImGui::rebuildFonts()
@@ -57,6 +106,8 @@ void ChatImGui::rebuildFonts()
 
 	if (SHGetSpecialFolderPathA(GetActiveWindow(), fontPath.data(), CSIDL_FONTS, false))
 	{
+		ImGui_ImplDX9_InvalidateDeviceObjects();
+
 		fontPath.resize(fontPath.find('\0'));
 		std::string fontName{ sampGetChatFontName() };
 		if (fontName == "Arial")
@@ -64,23 +115,26 @@ void ChatImGui::rebuildFonts()
 		fontPath += "\\" + fontName + ".ttf";
 
 		auto& io = ImGui::GetIO();
+		io.Fonts->Clear();
 		ImVector<ImWchar> ranges;
 		ImFontGlyphRangesBuilder builder;
+		io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 		builder.AddRanges(io.Fonts->GetGlyphRangesCyrillic());
 		builder.AddText(u8"‚„…†‡ˆ‰‹‘’“”•–—™›¹");
 		builder.BuildRanges(&ranges);
-
-		mCurrentFontSize = sampGetFontsize();
-		io.Fonts->AddFontFromFileTTF(fontPath.c_str(), mCurrentFontSize - 2, nullptr, ranges.Data);
+		
+		updateCurrentFontSize();
+		io.Fonts->AddFontFromFileTTF(fontPath.c_str(), getCurrentFontSize() - 2, nullptr, ranges.Data);
 		io.Fonts->Build();
 
 		ImGui::GetStyle().ItemSpacing.y = 2;
+
+		ImGui_ImplDX9_CreateDeviceObjects();
 	}
 }
 
 void ChatImGui::renderOutline(const char* text__)
 {
-
 	if (sampGetChatDisplayMode() == 2) // If outlines are enabled
 	{
 		auto pos = ImGui::GetCursorScreenPos();
@@ -140,24 +194,45 @@ void ChatImGui::renderText(ImVec4& color, void* data, bool isTimestamp)
 	ImGui::SameLine(0.0f, (isTimestamp ? 5.0f : 0.0f));
 }
 
-void ChatImGui::renderLine(ChatImGui::chat_line_t& data)
+void ChatImGui::renderLine(chat_line_t& data)
 {
 	ImVec4 color(1, 1, 1, 1);
-	for (auto& line : data)
-	{
+	
+	for (size_t i = 0; i < data.size(); i++) {
+		const auto& line = data[i];
+
 		switch (line.type)
 		{
-		case eLineMetadataType::COLOR:
+		case COLOR:
 			color = *reinterpret_cast<ImVec4*>(line.data);
 			break;
-		case eLineMetadataType::TIMESTAMP:
-			if (sampIsTimestampEnabled())
-				renderText(color, line.data, true);
+		case TIMESTAMP:
+			if (sampIsTimestampEnabled()) renderText(color, line.data, true);
 			break;
-		case eLineMetadataType::TEXT:
+		case TEXT:
 			renderText(color, line.data);
+			break;
+		}
+		
+		if (ImGui::IsItemHovered())
+		{
+			const auto& cursorX = ImGui::GetCursorPosX();
+			ImGui::SetCursorPosX(0.0f);
+			ImGui::Text(">");
+			ImGui::SameLine();
+			ImGui::SetCursorPosX(cursorX);
+
+			if (!TextContextMenuPopup)
+			{
+				if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+				{
+					pSelectedChatLine = &data;
+					TextContextMenuPopup = true;
+				}
+			}
 		}
 	}
+
 	ImGui::NewLine();
 }
 
@@ -183,6 +258,16 @@ auto ChatImGui::eraseFirstLine()
 {
 	auto ptr = gChat.mChatLines.begin();
 
+	if (pSelectedChatLine != nullptr)
+	{
+		const size_t index = std::distance(gChat.mChatLines.data(), pSelectedChatLine);
+		if (index > 0)
+		{
+			pSelectedChatLine = &gChat.mChatLines[index - 1];
+		}
+		else pSelectedChatLine = nullptr;
+	}
+
 	for (auto subPtr = ptr->begin(); subPtr != ptr->end(); subPtr++)
 	{
 		if (subPtr->data == nullptr) continue;
@@ -201,8 +286,7 @@ void* __fastcall CChat__CChat(void* ptr, void*, IDirect3DDevice9* pDevice, void*
 	ImGui::CreateContext();
 	ImGui_ImplWin32_Init(GetActiveWindow());
 	ImGui_ImplDX9_Init(pDevice);
-
-	gChat.rebuildFonts();
+	
 
 	return reinterpret_cast<void* (__thiscall*)(void*, IDirect3DDevice9*, void*, const char*)>(gChat.getConstrHook()->getTrampoline())
 		(ptr, pDevice, pFontRenderer, pChatLogPath);
@@ -218,15 +302,8 @@ void __fastcall CChat__AddEntry(void* ptr, void*, int nType, const char* szText,
 	ChatImGui::pushColorToBuffer(output, color);
 
 	{
-		std::string time_(64, '\0');
-		std::time_t t = std::time(nullptr);
-
-		if (reinterpret_cast<decltype(std::strftime)*>(sampGetStrftimeFuncPtr())
-			(time_.data(), time_.size() + 1, "[%H:%M:%S]", std::localtime(&t))
-		) {
-			time_.resize(time_.find('\0'));
-			ChatImGui::pushTimestampToBuffer(output, time_);
-		}
+		const auto& time = ChatImGui::BuildTimestampString();
+		ChatImGui::pushTimestampToBuffer(output, time);
 	}
 
 	if (nType == 2)
@@ -287,13 +364,137 @@ void __fastcall CChat__AddEntry(void* ptr, void*, int nType, const char* szText,
 		(ptr, nType, szText, szPrefix, textColor, prefixColor);
 }
 
+void __fastcall CChat__RecalcFontSize(void* ptr, void*)
+{
+	reinterpret_cast<void(__thiscall*)(void*)>(gChat.getRecalcFontSizeHook()->getTrampoline())(ptr);
+
+	gChat.rebuildFonts();
+}
+
+void __fastcall CObjectEdit__Render(void* ptr, void*)
+{
+	// CObjectEdit render
+	reinterpret_cast<void(__thiscall*)(void*)>(gChat.getObjectEditRenderHook()->getTrampoline())(ptr);
+
+	// Continued rendering [Over game elements]
+	if (editLineWindow)
+	{
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.12f, 0.9f));
+		if (ImGui::Begin("##EditLine", &editLineWindow, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground))
+		{
+			static const auto& io = ImGui::GetIO();
+			ImGui::SetWindowPos(ImVec2((io.DisplaySize.x - ImGui::GetWindowWidth()) * 0.5f,
+				(io.DisplaySize.y - ImGui::GetWindowHeight()) * 0.5f));
+
+			ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.0f, 12.0f));
+			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 12.0f));
+			ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+			ImGui::PushItemWidth(io.DisplaySize.x * (750.0f / 1920) );
+
+			if (ImGui::ColorButton("ColorButton", editLineColor, ImGuiColorEditFlags_NoTooltip))
+			{
+				ImGui::OpenPopup("ColorPickerPopup");
+			}
+
+			if (ImGui::BeginPopup("ColorPickerPopup"))
+			{
+				if (ImGui::ColorPicker3("##picker", (float*)&editLineColor, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview))
+				{
+					ChatImGui::SetLineColor(*pSelectedChatLine, editLineColor);
+				}
+				ImGui::EndPopup();
+			}
+
+			ImGui::SameLine(0.0f, 5.0f);
+
+			if (ImGui::InputText("##ChatLine", editLineBuffer, IM_ARRAYSIZE(editLineBuffer)))
+			{
+				if (pSelectedChatLine != nullptr)
+				{
+					auto& line = *pSelectedChatLine;
+					const std::string originalLine = ChatImGui::BuildChatString(line, true, true);
+
+					const auto lineData = ChatImGui::BuildChatLine(ChatImGui::GetLineTimestamp(line), originalLine.substr(0, 8) + editLineBuffer);
+					line = lineData;
+				}
+			}
+			ImVec2 inputPos = ImGui::GetItemRectMin();
+			ImVec2 inputSize = ImGui::GetItemRectSize();
+			ImDrawList* drawList = ImGui::GetWindowDrawList();
+			drawList->AddRect(inputPos, ImVec2(inputPos.x + inputSize.x, inputPos.y + inputSize.y), IM_COL32(255, 255, 255, 255));
+
+			ImGui::PopItemWidth();
+			ImGui::PopStyleVar(2);
+			ImGui::PopStyleColor();
+			ImGui::End();
+		}
+		ImGui::PopStyleColor();
+	}
+
+	if (ImGui::Begin("ImGui Chat##PopupWrapper", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoTitleBar))
+	{
+		if (TextContextMenuPopup && !ImGui::IsPopupOpen("TextContextMenu"))
+		{
+			ImGui::OpenPopup("TextContextMenu");
+			TextContextMenuPopup = false;
+		}
+
+		if (ImGui::BeginPopupContextItem("TextContextMenu"))
+		{
+			if (pSelectedChatLine != nullptr)
+			{
+				ImGui::PushItemWidth(350.0f);
+				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.0f, 12.0f));
+				ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.12f, 0.12f, 0.12f, 0.9f));
+				ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+				if (ImGui::MenuItem("Copy"))
+				{
+					const bool with_colors = (GetKeyState(VK_SHIFT) & 0x8000) != 0; // Hold shift
+					const auto text = ChatImGui::BuildChatString(*pSelectedChatLine, with_colors);
+					ImGui::SetClipboardText(text.c_str());
+				}
+				if (ImGui::MenuItem("Edit"))
+				{
+					const auto& line = *pSelectedChatLine;
+					const auto text = ChatImGui::BuildChatString(line, true, false);
+
+					editLineBuffer[0] = '\0';
+					strcat(editLineBuffer, text.substr(0, 256).c_str());
+
+					editLineColor = ChatImGui::GetLineColor(*pSelectedChatLine);
+					editLineWindow = true;
+				}
+				if (ImGui::MenuItem(u8"Delete"))
+				{
+					const auto it = std::find_if(gChat.mChatLines.begin(), gChat.mChatLines.end(), [&](const ChatImGui::chat_line_t& chatLine) {
+						return &chatLine == pSelectedChatLine;
+					});
+
+					if (it != gChat.mChatLines.end()) gChat.mChatLines.erase(it);
+				}
+				ImGui::PopItemWidth();
+				ImGui::PopStyleVar();
+				ImGui::PopStyleColor(2);
+			}
+
+			ImGui::EndPopup();
+		}
+
+		ImGui::End();
+	}
+
+	ImGui::EndFrame();
+	ImGui::Render();
+	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+}
+
 void __fastcall CChat__Render(void* ptr, void*)
 {
+	// Continued rendering [Under game elements]
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
-	ImGui::SetNextWindowPos(ImVec2(36, 18));
-	ImGui::SetNextWindowSize(ImVec2(4096, ImGui::GetTextLineHeightWithSpacing() * sampGetPagesize()));
+
 	if (gChat.isChatAlphaEnabled())
 	{
 		auto& alpha = ImGui::GetStyle().Alpha;
@@ -310,6 +511,9 @@ void __fastcall CChat__Render(void* ptr, void*)
 	}
 	if (ImGui::Begin("Chat ImGui", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoTitleBar))
 	{
+		ImGui::SetWindowPos(ImVec2(36, 18));
+		ImGui::SetWindowSize(ImVec2(4096, ImGui::GetTextLineHeightWithSpacing() * sampGetPagesize()));
+
 		static ImGuiListClipper clipper;
 		auto linesCount = gChat.getLinesCount();
 		clipper.Begin(linesCount);
@@ -317,10 +521,8 @@ void __fastcall CChat__Render(void* ptr, void*)
 			for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
 			{
 				auto elementId = row - linesCount + gChat.mChatLines.size();
-				if (elementId >= gChat.mChatLines.size())
-					ImGui::NewLine();
-				else
-					ChatImGui::renderLine(gChat.mChatLines[row - gChat.getLinesCount() + gChat.mChatLines.size()]);
+				if (elementId >= gChat.mChatLines.size()) ImGui::NewLine();
+				else ChatImGui::renderLine(gChat.mChatLines[elementId]);
 			}
 
 		if (gChat.shouldWeScrollToBottom())
@@ -343,9 +545,6 @@ void __fastcall CChat__Render(void* ptr, void*)
 
 		ImGui::End();
 	}
-	ImGui::EndFrame();
-	ImGui::Render();
-	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 }
 
 int __fastcall CChat__OnLostDevice(void* ptr, void*)
@@ -407,4 +606,148 @@ void CMDPROC__ICC(const char*)
 		gChat.mChatLines.push_back(line);
 
 	memset(reinterpret_cast<void*>(sampGetChatInfoPtr() + 0x132), 0x0, 0xFC);
+}
+
+ImVec4 ChatImGui::ParseColor(const std::string& colorStr) {
+	ImVec4 color;
+	if (colorStr.size() == 6) {
+		int r, g, b;
+		sscanf(colorStr.c_str(), "%02x%02x%02x", &r, &g, &b);
+		color.x = static_cast<float>(r) / 255.0f;
+		color.y = static_cast<float>(g) / 255.0f;
+		color.z = static_cast<float>(b) / 255.0f;
+		color.w = 1.0f;
+	}
+	else {
+		// Default color if format is invalid
+		color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+	}
+	return color;
+}
+
+std::string ChatImGui::BuildTimestampString()
+{
+	std::string time_(64, '\0');
+	std::time_t t = std::time(nullptr);
+
+	if (reinterpret_cast<decltype(std::strftime)*>(sampGetStrftimeFuncPtr())
+		(time_.data(), time_.size() + 1, "[%H:%M:%S]", std::localtime(&t))
+		) {
+		time_.resize(time_.find('\0'));
+		return time_;
+	}
+	return "";
+}
+
+std::string ChatImGui::BuildChatString(const chat_line_t& data, bool colors, bool prefix)
+{
+	std::string text; bool prefixAdded = false;
+	for (const auto& line : data) {
+		switch (line.type)
+		{
+			case ChatImGui::COLOR:
+			{
+				if (!colors) break;
+				const ImVec4 color = *static_cast<ImVec4*>(line.data);
+				if (!prefixAdded)
+				{
+					prefixAdded = true;
+					if (!prefix) continue;
+				}
+
+				char buf[8 + 1];
+				snprintf(buf, sizeof(buf), "{%02X%02X%02X}", (int)(color.x * 255), (int)(color.y * 255), (int)(color.z * 255));
+				text += buf;
+				break;
+			}
+			case ChatImGui::TEXT:
+				text += static_cast<char*>(line.data);
+				break;
+			default: break;
+		}
+	}
+	return text;
+}
+
+ChatImGui::chat_line_t ChatImGui::BuildChatLine(const std::string& timestamp, const std::string& string) {
+	chat_line_t result;
+	std::string remainingText = string;
+	bool timestampAdded = false;
+	
+	std::regex colorTagRegex(R"(\{([0-9A-Fa-f]{6})\})");
+	std::smatch match;
+	
+	while (std::regex_search(remainingText, match, colorTagRegex)) {
+		std::string textBefore = match.prefix();
+		if (!textBefore.empty()) {
+			pushTextToBuffer(result, textBefore, false);
+		}
+
+		if (match.size() >= 2) {
+			std::string colorHex = match[1].str();
+			ImVec4 color = ParseColor(colorHex);
+			
+			pushColorToBuffer(result, color);
+			
+			if (!timestampAdded) {
+				pushTimestampToBuffer(result, timestamp);
+				timestampAdded = true;
+			}
+		}
+		else {
+			pushTextToBuffer(result, match[0].str(), false);
+		}
+		
+		remainingText = match.suffix();
+	}
+
+	if (!timestampAdded) {
+		auto color = ImVec4(1.0, 1.0, 1.0, 1.0);
+		pushColorToBuffer(result, color);
+		pushTimestampToBuffer(result, timestamp);
+	}
+	
+	if (!remainingText.empty()) {
+		pushTextToBuffer(result, remainingText, false);
+	}
+
+	return result;
+}
+
+const char* ChatImGui::GetLineTimestamp(const chat_line_t& data)
+{
+	for (const auto& line : data)
+	{
+		if (line.type == TIMESTAMP)
+		{
+			return static_cast<const char*>(line.data);
+		}
+	}
+
+	return nullptr;
+}
+
+ImVec4 ChatImGui::GetLineColor(const chat_line_t& data)
+{
+	for (const auto& line : data)
+	{
+		if (line.type == COLOR)
+		{
+			return *static_cast<ImVec4*>(line.data);
+		}
+	}
+
+	return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+}
+
+void ChatImGui::SetLineColor(chat_line_t& data, ImVec4 color)
+{
+	for (auto& line : data)
+	{
+		if (line.type == COLOR)
+		{
+			line.data = reinterpret_cast<void*>(new ImVec4(color));
+			return;
+		}
+	}
 }

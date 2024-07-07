@@ -12,11 +12,11 @@ enum SAMPVER {
 
 typedef void(__cdecl* CMDPROC)(const char*);
 
-const uintptr_t samp_addressess[][19]
+const uintptr_t samp_addressess[][23]
 {
-    // CChat, ::CChat, ::OnLostDevice, ::OnResetDevice, ::Draw->call ::Render, getChatFontName, ::AddEntry, ::Scroll->call DXUT__Scroll, ::ScrollToBottom, ::PageUp, ::PageDown, CInput, CInput::AddCommand, CConfig?, CConfig?::SaveVariable, CConfig?::ReadVariable, CNetGame
-    {0x21A0E4, 0x647B0, 0x635D0, 0x64600, 0x642E7, 0xB3D40, 0x64010, 0xB87E7, 0xB3C60, 0x63828, 0x637C0, 0x63700, 0x63760, 0x21A0E8, 0x65AD0, 0x21A0E0, 0x624C0, 0x62250, 0x21A0F8},       // SAMP_037_R1
-    {0x26E8C8, 0x67C00, 0x66A20, 0x67A50, 0x67737, 0xC5C00, 0x67460, 0xCA970, 0xC5B20, 0x66C78, 0x66C10, 0x66B50, 0x66BB0, 0x26E8CC, 0x69000, 0x26E8C4, 0x65910, 0x656A0, 0x26E8DC}        // SAMP_037_R3_1
+    // CChat, ::CChat, ::OnLostDevice, ::OnResetDevice, ::Draw->call ::Render, getChatFontName, ::AddEntry, ::Scroll->call DXUT__Scroll, ::ScrollToBottom, ::PageUp, ::PageDown, CInput, CInput::AddCommand, CConfig?, CConfig?::SaveVariable, CConfig?::ReadVariable, CNetGame, CChat::AddMessage, CDialog::Draw, CChat::RecalcFontSize
+    {0x21A0E4, 0x647B0, 0x635D0, 0x64600, 0x642E7, 0xB3D40, 0x64010, 0xB87E7, 0xB3C60, 0x63828, 0x637C0, 0x63700, 0x63760, 0x21A0E8, 0x65AD0, 0x21A0E0, 0x624C0, 0x62250, 0x21A0F8, 0x64450, 0x6B240, 0x6F1A0, 0x63550},       // SAMP_037_R1
+    {0x26E8C8, 0x67C00, 0x66A20, 0x67A50, 0x67737, 0xC5C00, 0x67460, 0xCA970, 0xC5B20, 0x66C78, 0x66C10, 0x66B50, 0x66BB0, 0x26E8CC, 0x69000, 0x26E8C4, 0x65910, 0x656A0, 0x26E8DC, 0x679F0, 0x6F140, 0x73090, 0x669A0}        // SAMP_037_R3_1
 };
 
 const uintptr_t chat_nops[][2]
@@ -140,6 +140,18 @@ inline uintptr_t sampGetChatPageDownFuncPtr()
     return sampGetBase() + SAMP_OFFSET[12];
 }
 
+inline uintptr_t sampGetDialogDraw() {
+    return sampGetBase() + SAMP_OFFSET[20];
+}
+
+inline uintptr_t sampGetObjectEditRender() {
+    return sampGetBase() + SAMP_OFFSET[21];
+}
+
+inline uintptr_t sampGetRecalcFontSize() {
+    return sampGetBase() + SAMP_OFFSET[22];
+}
+
 inline bool sampIsTimestampEnabled()
 {
     return *reinterpret_cast<bool*>(sampGetChatInfoPtr() + 0xC);
@@ -191,6 +203,12 @@ inline int sampReadVariableFromConfig(const char* name)
 {
     return reinterpret_cast<int(__thiscall*)(uintptr_t, const char*)>(sampGetBase() + SAMP_OFFSET[17])
         (sampGetConfigPtr(), name);
+}
+
+inline void sampAddChatMessage(const char* text, uint32_t color)
+{
+    return reinterpret_cast<void(__thiscall*)(uintptr_t, uint32_t, const char*)>(sampGetBase() + SAMP_OFFSET[19])
+        (sampGetChatInfoPtr(), (color << 8) | 0xFF, text);
 }
 
 #undef SAMP_OFFSET
