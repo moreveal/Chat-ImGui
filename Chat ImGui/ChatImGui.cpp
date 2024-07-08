@@ -1,26 +1,21 @@
 #include "pch.h"
 #include "ChatImGui.h"
-
 #include "snippets.hpp"
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 void ChatImGui::initialize()
 {
 	mChatLines.reserve(152);
-	
-	mChatConstrHook = new rtdhook(sampGetChatConstr(), &CChat__CChat);
-	mChatOnLostDeviceHook = new rtdhook(sampGetChatOnLostDevice(), &CChat__OnLostDevice, 9);
-	mChatAddEntryHook = new rtdhook(sampGetAddEntryFuncPtr(), &CChat__AddEntry);
-	mRecalcFontSizeHook = new rtdhook(sampGetRecalcFontSize(), &CChat__RecalcFontSize, 33);
-	mChatRenderHook = new rtdhook_call(sampGetChatRender(), &CChat__Render);
 
-	mChatDXUTScrollHook = new rtdhook_call(sampGetChatScrollDXUTScrollCallPtr(), &CDXUTScrollBar__Scroll);
-	mChatScrollToBottomHook = new rtdhook(sampGetChatScrollToBottomFuncPtr(), &CChat__ScrollToBottom, 7);
-	mChatPageUpHook = new rtdhook(sampGetChatPageUpFuncPtr(), &CChat__PageUp, 6);
-	mChatPageDownHook = new rtdhook(sampGetChatPageDownFuncPtr(), &CChat__PageDown, 6);
-	
-	mObjectEditRenderHook = new rtdhook(sampGetObjectEditRender(), &CObjectEdit__Render, 9);
+	SetHook(mChatConstrHook, sampGetChatConstr(), &CChat__CChat);
+	SetHook(mChatOnLostDeviceHook, sampGetChatOnLostDevice(), &CChat__OnLostDevice);
+	SetHook(mChatEntryHook, sampGetAddEntryFuncPtr(), &CChat__AddEntry);
+	SetHook(mRecalcFontSizeHook, sampGetRecalcFontSize(), &CChat__RecalcFontSize);
+	SetHook(mChatRenderHook, sampGetChatRender(), &CChat__Render);
+	SetHook(mChatDXUTScrollHook, sampGetChatScrollDXUTScrollCallPtr(), &CDXUTScrollBar__Scroll);
+	SetHook(mChatScrollToBottomHook, sampGetChatScrollToBottomFuncPtr(), &CChat__ScrollToBottom);
+	SetHook(mChatPageUpHook, sampGetChatPageUpFuncPtr(), &CChat__PageUp);
+	SetHook(mChatPageDownHook, sampGetChatPageDownFuncPtr(), &CChat__PageDown);
+	SetHook(mObjectEditRenderHook, sampGetObjectEditRender(), &CObjectEdit__Render);
 
 	{ // Nops
 		DWORD old_protection;
@@ -32,20 +27,6 @@ void ChatImGui::initialize()
 
 		VirtualProtect(address, nops[1], old_protection, nullptr);
 	} // Nops
-
-	mChatConstrHook->install();
-	mChatOnLostDeviceHook->install();
-	mChatRenderHook->install();
-	mChatAddEntryHook->install();
-
-	mRecalcFontSizeHook->install();
-
-	mChatDXUTScrollHook->install();
-	mChatScrollToBottomHook->install();
-	mChatPageUpHook->install();
-	mChatPageDownHook->install();
-	
-	mObjectEditRenderHook->install();
 
 	//AllocConsole(); freopen("CONOUT$", "w", stdout); // Log
 
@@ -59,17 +40,17 @@ void ChatImGui::initialize()
 			mChatAlphaEnabled = sampReadVariableFromConfig("alphachat");
 
 			mLinesCount = sampGetPagesize();
-
+			
 			// WndProcHook
 			while (!(*reinterpret_cast<uintptr_t*>(0x00C8D4C0) == 9 && sampGetBase() != 0)) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 			const HWND GameHWND = *(*reinterpret_cast<HWND**>(0xC17054));
-			mWndProcHook = new rtdhook_call(GetWindowLongPtrW(GameHWND, GWLP_WNDPROC), &WndProcHandle);
-			mWndProcHook->install();
+			const auto originalWndProc = reinterpret_cast<uintptr_t>(reinterpret_cast<WNDPROC>(GetWindowLongPtrW(GameHWND, GWLP_WNDPROC)));
+			SetHook(mWndProcHook, originalWndProc, &WndProcHandle);
 		}
 	).detach();
 }
 
-LRESULT CALLBACK WndProcHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+HRESULT __stdcall WndProcHandle(const decltype(gChat.mWndProcHook)& hook, HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	wchar_t wch;
 	MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, reinterpret_cast<char*>(&wParam), 1, &wch, 1);
@@ -97,7 +78,7 @@ LRESULT CALLBACK WndProcHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 		}
 	}
 
-	return CallWindowProc(reinterpret_cast<WNDPROC>(gChat.getWndProcHook()->getHookedFunctionAddress()), hWnd, msg, wParam, lParam);
+	return hook.get_trampoline()(hWnd, msg, wParam, lParam);
 }
 
 void ChatImGui::rebuildFonts()
@@ -281,18 +262,161 @@ auto ChatImGui::eraseFirstLine()
 	return gChat.mChatLines.erase(ptr);
 }
 
-void* __fastcall CChat__CChat(void* ptr, void*, IDirect3DDevice9* pDevice, void* pFontRenderer, const char* pChatLogPath)
+ImVec4 ChatImGui::ParseColor(const std::string& colorStr) {
+	ImVec4 color;
+	if (colorStr.size() == 6) {
+		int r, g, b;
+		sscanf(colorStr.c_str(), "%02x%02x%02x", &r, &g, &b);
+		color.x = static_cast<float>(r) / 255.0f;
+		color.y = static_cast<float>(g) / 255.0f;
+		color.z = static_cast<float>(b) / 255.0f;
+		color.w = 1.0f;
+	}
+	else {
+		// Default color if format is invalid
+		color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+	}
+	return color;
+}
+
+std::string ChatImGui::BuildTimestampString()
+{
+	std::string time_(64, '\0');
+	std::time_t t = std::time(nullptr);
+
+	if (reinterpret_cast<decltype(std::strftime)*>(sampGetStrftimeFuncPtr())
+		(time_.data(), time_.size() + 1, "[%H:%M:%S]", std::localtime(&t))
+		) {
+		time_.resize(time_.find('\0'));
+		return time_;
+	}
+	return "";
+}
+
+std::string ChatImGui::BuildChatString(const chat_line_t& data, bool colors, bool prefix)
+{
+	std::string text; bool prefixAdded = false;
+	for (const auto& line : data) {
+		switch (line.type)
+		{
+			case ChatImGui::COLOR:
+			{
+				if (!colors) break;
+				const ImVec4 color = *static_cast<ImVec4*>(line.data);
+				if (!prefixAdded)
+				{
+					prefixAdded = true;
+					if (!prefix) continue;
+				}
+
+				char buf[8 + 1];
+				snprintf(buf, sizeof(buf), "{%02X%02X%02X}", (int)(color.x * 255), (int)(color.y * 255), (int)(color.z * 255));
+				text += buf;
+				break;
+			}
+			case ChatImGui::TEXT:
+				text += static_cast<char*>(line.data);
+				break;
+			default: break;
+		}
+	}
+	return text;
+}
+
+ChatImGui::chat_line_t ChatImGui::BuildChatLine(const std::string& timestamp, const std::string& string) {
+	chat_line_t result;
+	std::string remainingText = string;
+	bool timestampAdded = false;
+
+	std::regex colorTagRegex(R"(\{([0-9A-Fa-f]{6})\})");
+	std::smatch match;
+
+	while (std::regex_search(remainingText, match, colorTagRegex)) {
+		std::string textBefore = match.prefix();
+		if (!textBefore.empty()) {
+			pushTextToBuffer(result, textBefore, false);
+		}
+
+		if (match.size() >= 2) {
+			std::string colorHex = match[1].str();
+			ImVec4 color = ParseColor(colorHex);
+
+			pushColorToBuffer(result, color);
+
+			if (!timestampAdded) {
+				pushTimestampToBuffer(result, timestamp);
+				timestampAdded = true;
+			}
+		}
+		else {
+			pushTextToBuffer(result, match[0].str(), false);
+		}
+
+		remainingText = match.suffix();
+	}
+
+	if (!timestampAdded) {
+		auto color = ImVec4(1.0, 1.0, 1.0, 1.0);
+		pushColorToBuffer(result, color);
+		pushTimestampToBuffer(result, timestamp);
+	}
+
+	if (!remainingText.empty()) {
+		pushTextToBuffer(result, remainingText, false);
+	}
+
+	return result;
+}
+
+const char* ChatImGui::GetLineTimestamp(const chat_line_t& data)
+{
+	for (const auto& line : data)
+	{
+		if (line.type == TIMESTAMP)
+		{
+			return static_cast<const char*>(line.data);
+		}
+	}
+
+	return nullptr;
+}
+
+ImVec4 ChatImGui::GetLineColor(const chat_line_t& data)
+{
+	for (const auto& line : data)
+	{
+		if (line.type == COLOR)
+		{
+			return *static_cast<ImVec4*>(line.data);
+		}
+	}
+
+	return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+}
+
+void ChatImGui::SetLineColor(chat_line_t& data, ImVec4 color)
+{
+	for (auto& line : data)
+	{
+		if (line.type == COLOR)
+		{
+			line.data = reinterpret_cast<void*>(new ImVec4(color));
+			return;
+		}
+	}
+}
+
+
+void* __fastcall CChat__CChat(const decltype(gChat.mChatConstrHook)& hook, void* ptr, void*, IDirect3DDevice9* pDevice, void* pFontRenderer, const char* pChatLogPath)
 {
 	ImGui::CreateContext();
 	ImGui_ImplWin32_Init(GetActiveWindow());
 	ImGui_ImplDX9_Init(pDevice);
-	
 
-	return reinterpret_cast<void* (__thiscall*)(void*, IDirect3DDevice9*, void*, const char*)>(gChat.getConstrHook()->getTrampoline())
-		(ptr, pDevice, pFontRenderer, pChatLogPath);
+	return hook.get_trampoline()(ptr, nullptr, pDevice, pFontRenderer, pChatLogPath);
 }
 
-void __fastcall CChat__AddEntry(void* ptr, void*, int nType, const char* szText, const char* szPrefix, uint32_t textColor, uint32_t prefixColor)
+void __fastcall CChat__AddEntry(const decltype(gChat.mChatEntryHook)& hook, void* ptr, void*, int nType, const char* szText, const char* szPrefix, uint32_t textColor, uint32_t prefixColor)
 {
 	std::string text(szText);
 	ChatImGui::chat_line_t output;
@@ -360,21 +484,20 @@ void __fastcall CChat__AddEntry(void* ptr, void*, int nType, const char* szText,
 	if (gChat.getLinesCount() > 150)
 		gChat.eraseFirstLine();
 
-	reinterpret_cast<void(__thiscall*)(void*, uint32_t, const char*, const char*, uint32_t, uint32_t)>(gChat.getAddEntryHook()->getTrampoline())
-		(ptr, nType, szText, szPrefix, textColor, prefixColor);
+	hook.get_trampoline()(ptr, nullptr, nType, szText, szPrefix, textColor, prefixColor);
 }
 
-void __fastcall CChat__RecalcFontSize(void* ptr, void*)
+void __fastcall CChat__RecalcFontSize(const decltype(gChat.mRecalcFontSizeHook)& hook, void* ptr, void*)
 {
-	reinterpret_cast<void(__thiscall*)(void*)>(gChat.getRecalcFontSizeHook()->getTrampoline())(ptr);
+	hook.get_trampoline()(ptr, nullptr);
 
 	gChat.rebuildFonts();
 }
 
-void __fastcall CObjectEdit__Render(void* ptr, void*)
+void __fastcall CObjectEdit__Render(const decltype(gChat.mObjectEditRenderHook)& hook, void* ptr, void*)
 {
 	// CObjectEdit render
-	reinterpret_cast<void(__thiscall*)(void*)>(gChat.getObjectEditRenderHook()->getTrampoline())(ptr);
+	hook.get_trampoline()(ptr, nullptr);
 
 	// Continued rendering [Over game elements]
 	if (editLineWindow)
@@ -488,7 +611,7 @@ void __fastcall CObjectEdit__Render(void* ptr, void*)
 	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 }
 
-void __fastcall CChat__Render(void* ptr, void*)
+void __fastcall CChat__Render(const decltype(gChat.mChatRenderHook)& hook, void* ptr, void*)
 {
 	// Continued rendering [Under game elements]
 	ImGui_ImplDX9_NewFrame();
@@ -547,48 +670,47 @@ void __fastcall CChat__Render(void* ptr, void*)
 	}
 }
 
-int __fastcall CChat__OnLostDevice(void* ptr, void*)
+int __fastcall CChat__OnLostDevice(const decltype(gChat.mChatOnLostDeviceHook)& hook, void* ptr, void*)
 {
 	ImGui_ImplDX9_InvalidateDeviceObjects();
 
-	return reinterpret_cast<int(__thiscall*)(void*)>(gChat.getOnLostDeviceHook()->getTrampoline())(ptr);
+	return hook.get_trampoline()(ptr, nullptr);
 }
 
-int __fastcall CDXUTScrollBar__Scroll(void* ptr, void*, int nDelta)
+int __fastcall CDXUTScrollBar__Scroll(const decltype(gChat.mChatDXUTScrollHook)& hook, void* ptr, void*, int nDelta)
 {
 	gChat.scrollTo(nDelta);
 
-	return reinterpret_cast<int(__thiscall*)(void*, int)>(gChat.getDXUTScrollHook()->getHookedFunctionAddress())(ptr, nDelta);
+	return hook.get_trampoline()(ptr, nullptr, nDelta);
 }
 
-int __fastcall CChat__ScrollToBottom(void* ptr, void*)
+int __fastcall CChat__ScrollToBottom(const decltype(gChat.mChatScrollToBottomHook)& hook, void* ptr, void*)
 {
 	gChat.scrollToBottom();
 
-	return reinterpret_cast<int(__thiscall*)(void*)>(gChat.getScrollToBottomHook()->getTrampoline())(ptr);
+	return hook.get_trampoline()(ptr, nullptr);
 }
 
-int __fastcall CChat__PageUp(void* ptr, void*)
+int __fastcall CChat__PageUp(const decltype(gChat.mChatPageUpHook)& hook, void* ptr, void*)
 {
 	gChat.scrollTo(-15);
 
-	return reinterpret_cast<int(__thiscall*)(void*)>(gChat.getPageUpHook()->getTrampoline())(ptr);
+	return hook.get_trampoline()(ptr, nullptr);
 }
 
-int __fastcall CChat__PageDown(void* ptr, void*)
+int __fastcall CChat__PageDown(const decltype(gChat.mChatPageDownHook)& hook, void* ptr, void*)
 {
 	gChat.scrollTo(15);
 
-	return reinterpret_cast<int(__thiscall*)(void*)>(gChat.getPageDownHook()->getTrampoline())(ptr);
+	return hook.get_trampoline()(ptr, nullptr);
 }
 
 void CMDPROC__AlphaChat(const char*)
 {
 	gChat.switchChatAlphaState();
 	bool enabled = gChat.isChatAlphaEnabled();
-	std::string text_("-> Chat alpha ");
-	text_ += enabled ? "enabled" : "disabled";
-	CChat__AddEntry(reinterpret_cast<void*>(sampGetChatInfoPtr()), nullptr, (1 << 2), text_.c_str(), nullptr, 0xFF88AA62, 0);
+	const auto text_ = std::string("-> Chat alpha ") + (enabled ? "enabled" : "disabled");
+	sampAddChatMessage(text_.c_str(), 0xFF88AA62);
 
 	sampSaveVariableToConfig("alphachat", enabled);
 
@@ -606,148 +728,4 @@ void CMDPROC__ICC(const char*)
 		gChat.mChatLines.push_back(line);
 
 	memset(reinterpret_cast<void*>(sampGetChatInfoPtr() + 0x132), 0x0, 0xFC);
-}
-
-ImVec4 ChatImGui::ParseColor(const std::string& colorStr) {
-	ImVec4 color;
-	if (colorStr.size() == 6) {
-		int r, g, b;
-		sscanf(colorStr.c_str(), "%02x%02x%02x", &r, &g, &b);
-		color.x = static_cast<float>(r) / 255.0f;
-		color.y = static_cast<float>(g) / 255.0f;
-		color.z = static_cast<float>(b) / 255.0f;
-		color.w = 1.0f;
-	}
-	else {
-		// Default color if format is invalid
-		color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-	}
-	return color;
-}
-
-std::string ChatImGui::BuildTimestampString()
-{
-	std::string time_(64, '\0');
-	std::time_t t = std::time(nullptr);
-
-	if (reinterpret_cast<decltype(std::strftime)*>(sampGetStrftimeFuncPtr())
-		(time_.data(), time_.size() + 1, "[%H:%M:%S]", std::localtime(&t))
-		) {
-		time_.resize(time_.find('\0'));
-		return time_;
-	}
-	return "";
-}
-
-std::string ChatImGui::BuildChatString(const chat_line_t& data, bool colors, bool prefix)
-{
-	std::string text; bool prefixAdded = false;
-	for (const auto& line : data) {
-		switch (line.type)
-		{
-			case ChatImGui::COLOR:
-			{
-				if (!colors) break;
-				const ImVec4 color = *static_cast<ImVec4*>(line.data);
-				if (!prefixAdded)
-				{
-					prefixAdded = true;
-					if (!prefix) continue;
-				}
-
-				char buf[8 + 1];
-				snprintf(buf, sizeof(buf), "{%02X%02X%02X}", (int)(color.x * 255), (int)(color.y * 255), (int)(color.z * 255));
-				text += buf;
-				break;
-			}
-			case ChatImGui::TEXT:
-				text += static_cast<char*>(line.data);
-				break;
-			default: break;
-		}
-	}
-	return text;
-}
-
-ChatImGui::chat_line_t ChatImGui::BuildChatLine(const std::string& timestamp, const std::string& string) {
-	chat_line_t result;
-	std::string remainingText = string;
-	bool timestampAdded = false;
-	
-	std::regex colorTagRegex(R"(\{([0-9A-Fa-f]{6})\})");
-	std::smatch match;
-	
-	while (std::regex_search(remainingText, match, colorTagRegex)) {
-		std::string textBefore = match.prefix();
-		if (!textBefore.empty()) {
-			pushTextToBuffer(result, textBefore, false);
-		}
-
-		if (match.size() >= 2) {
-			std::string colorHex = match[1].str();
-			ImVec4 color = ParseColor(colorHex);
-			
-			pushColorToBuffer(result, color);
-			
-			if (!timestampAdded) {
-				pushTimestampToBuffer(result, timestamp);
-				timestampAdded = true;
-			}
-		}
-		else {
-			pushTextToBuffer(result, match[0].str(), false);
-		}
-		
-		remainingText = match.suffix();
-	}
-
-	if (!timestampAdded) {
-		auto color = ImVec4(1.0, 1.0, 1.0, 1.0);
-		pushColorToBuffer(result, color);
-		pushTimestampToBuffer(result, timestamp);
-	}
-	
-	if (!remainingText.empty()) {
-		pushTextToBuffer(result, remainingText, false);
-	}
-
-	return result;
-}
-
-const char* ChatImGui::GetLineTimestamp(const chat_line_t& data)
-{
-	for (const auto& line : data)
-	{
-		if (line.type == TIMESTAMP)
-		{
-			return static_cast<const char*>(line.data);
-		}
-	}
-
-	return nullptr;
-}
-
-ImVec4 ChatImGui::GetLineColor(const chat_line_t& data)
-{
-	for (const auto& line : data)
-	{
-		if (line.type == COLOR)
-		{
-			return *static_cast<ImVec4*>(line.data);
-		}
-	}
-
-	return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-}
-
-void ChatImGui::SetLineColor(chat_line_t& data, ImVec4 color)
-{
-	for (auto& line : data)
-	{
-		if (line.type == COLOR)
-		{
-			line.data = reinterpret_cast<void*>(new ImVec4(color));
-			return;
-		}
-	}
 }

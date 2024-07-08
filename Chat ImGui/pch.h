@@ -13,6 +13,9 @@
 // Добавьте сюда заголовочные файлы для предварительной компиляции
 #include "framework.h"
 #include "rtdhook.hpp"
+
+#include "kthook/kthook.hpp"
+
 #include "samp.hpp"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
