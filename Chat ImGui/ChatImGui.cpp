@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "ChatImGui.h"
 #include "snippets.hpp"
+#include "misc/freetype/imgui_freetype.h"
 
 void ChatImGui::initialize()
 {
@@ -105,7 +106,9 @@ void ChatImGui::rebuildFonts()
 		builder.BuildRanges(&ranges);
 		
 		updateCurrentFontSize();
-		io.Fonts->AddFontFromFileTTF(fontPath.c_str(), getCurrentFontSize() - 2, nullptr, ranges.Data);
+		ImFontConfig cfg;
+		cfg.FontBuilderFlags |= ImGuiFreeTypeBuilderFlags_LightHinting | ImGuiFreeTypeBuilderFlags_ForceAutoHint;
+		io.Fonts->AddFontFromFileTTF(fontPath.c_str(), getCurrentFontSize() - 2, &cfg, ranges.Data);
 		io.Fonts->Build();
 
 		ImGui::GetStyle().ItemSpacing.y = 2;
@@ -405,7 +408,6 @@ void ChatImGui::SetLineColor(chat_line_t& data, ImVec4 color)
 		}
 	}
 }
-
 
 void* __fastcall CChat__CChat(const decltype(gChat.mChatConstrHook)& hook, void* ptr, void*, IDirect3DDevice9* pDevice, void* pFontRenderer, const char* pChatLogPath)
 {
